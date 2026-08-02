@@ -470,3 +470,11 @@
     flex-direction: column;
     gap: 6px;
 }
+
+/* ─── Consolidation Selection ─────────────────────────────────── */
+
+.sc-snippet-select {
+    flex-shrink: 0;
+    margin: 2px 0 0 0;
+    cursor: pointer;
+}

@@ -44,7 +44,7 @@
                 <button id="sc_reset_hidden" class="menu_button" title="Re-sync hidden state of summarized messages with the 'Disable Message Hiding' toggle: re-hides them when hiding is enabled, unhides them when hiding is disabled.">
                     <i class="fa-solid fa-ghost"></i> Reset Hidden Messages
                 </button>
-                <button id="sc_consolidate" class="menu_button" title="Merge ALL memory snippets from every layer into one concise bullet block using the consolidation prompt. Previous memory is backed up for undo.">
+                <button id="sc_consolidate" class="menu_button" title="Merge memory snippets into one concise bullet block using the consolidation prompt. Tick checkboxes in the Snippet Browser to consolidate only those; with nothing ticked, ALL snippets are consolidated. Previous memory is backed up for undo.">
                     <i class="fa-solid fa-compress"></i> Consolidate Memory
                 </button>
                 <button id="sc_undo_consolidation" class="menu_button" title="Restore the memory that existed before the last consolidation.">
@@ -69,6 +69,7 @@
 
             <!-- ═══ Snippet Browser ═══ -->
             <h4 class="sc-section-title">🗂️ Snippet Browser</h4>
+            <small class="sc-hint">Tick checkboxes to choose specific snippets for "Consolidate Memory" — with nothing ticked, it consolidates everything. Click a snippet's text to edit it.</small>
             <div id="sc_snippet_browser" class="sc-snippet-browser"></div>
 
             <hr class="sc-divider" />

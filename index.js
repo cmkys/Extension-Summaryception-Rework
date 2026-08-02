@@ -671,11 +671,18 @@ async function restoreRecentTurns(count) {
 }
 
 /**
- * Consolidation: merge ALL memory snippets (every layer) into one concise
- * bullet block using the user-configurable consolidation prompt. The previous
- * layer structure is backed up in the chat store for one-step undo.
+ * Consolidation: merge memory snippets into one concise bullet block using
+ * the user-configurable consolidation prompt.
+ *
+ * @param {Array<{layer:number, idx:number}>} [selection] - Specific snippets
+ *   to consolidate. Omitted/empty = consolidate ALL snippets in all layers.
+ *   Partial consolidation replaces the selected snippets with one block,
+ *   inserted where the oldest selected snippet sat (chronology preserved);
+ *   unselected snippets are untouched.
+ *
+ * The previous layer structure is backed up in the chat store for one-step undo.
  */
-async function consolidateMemory() {
+async function consolidateMemory(selection = null) {
     const s = getSettings();
     const store = getChatStore();
 
@@ -684,13 +691,38 @@ async function consolidateMemory() {
         return;
     }
 
-    // Chronological: deepest layer (oldest content) first, layer 0 last —
-    // same ordering as assembleSummaryBlock.
-    const all = [];
-    for (let i = (store.layers?.length || 0) - 1; i >= 1; i--) {
-        for (const sn of (store.layers[i] || [])) all.push(sn.text);
+    const partial = Array.isArray(selection) && selection.length > 0;
+
+    // Validate selection against current store (browser may be stale)
+    let picked = [];
+    if (partial) {
+        for (const sel of selection) {
+            const sn = store.layers?.[sel.layer]?.[sel.idx];
+            if (sn) picked.push({ ...sel, sn });
+        }
+        if (picked.length !== selection.length) {
+            toastr.error('Selection is out of date — the snippet browser changed. Re-select and try again.', 'Summaryception');
+            updateUI();
+            return;
+        }
+        if (picked.length === 1) {
+            toastr.info('Select at least 2 snippets to consolidate (or none to consolidate everything).', 'Summaryception');
+            return;
+        }
+        // Assembly (chronological) order: deepest layer first, then by index.
+        picked.sort((a, b) => (b.layer - a.layer) || (a.idx - b.idx));
     }
-    for (const sn of (store.layers?.[0] || [])) all.push(sn.text);
+
+    // Collect texts chronologically
+    const all = [];
+    if (partial) {
+        for (const p of picked) all.push(p.sn.text);
+    } else {
+        for (let i = (store.layers?.length || 0) - 1; i >= 1; i--) {
+            for (const sn of (store.layers[i] || [])) all.push(sn.text);
+        }
+        for (const sn of (store.layers?.[0] || [])) all.push(sn.text);
+    }
 
     if (all.length === 0) {
         toastr.info('No memory snippets to consolidate.', 'Summaryception');
@@ -707,10 +739,13 @@ async function consolidateMemory() {
     if (isDefaultMode) disableAllPromptToggles();
 
     try {
-        toastr.info(`Consolidating ${all.length} snippets into one block…`, 'Summaryception', {
-            timeOut: 5000,
-            progressBar: true,
-        });
+        toastr.info(
+            partial
+                ? `Consolidating ${all.length} selected snippets…`
+                : `Consolidating all ${all.length} snippets into one block…`,
+            'Summaryception',
+            { timeOut: 5000, progressBar: true }
+        );
 
         const userPrompt = `${s.consolidationPrompt}\n\nSnippets (oldest first):\n${all.join('\n')}`;
         const raw = await sendSummarizerRequest(s, s.summarizerSystemPrompt, userPrompt);
@@ -721,40 +756,64 @@ async function consolidateMemory() {
             return;
         }
 
-        // Backup for undo, then replace everything with one snippet.
+        // Backup for undo, then apply.
         store.consolidationBackup = {
             layers: structuredClone(store.layers),
             summarizedUpTo: store.summarizedUpTo,
             timestamp: Date.now(),
         };
 
-        const ranges = [];
-        for (const layer of (store.layers || [])) {
-            for (const sn of (layer || [])) if (sn.turnRange) ranges.push(sn.turnRange);
-        }
+        // turnRange of the new block = span of what it replaces
+        const sourceSnippets = partial
+            ? picked.map(p => p.sn)
+            : (store.layers || []).flatMap(l => l || []);
+        const ranges = sourceSnippets.filter(sn => sn.turnRange).map(sn => sn.turnRange);
         const minStart = ranges.length ? Math.min(...ranges.map(r => r[0])) : 0;
         const maxEnd = Math.max(
             ranges.length ? Math.max(...ranges.map(r => r[1])) : -1,
-            store.summarizedUpTo
+            partial ? -1 : store.summarizedUpTo
         );
 
-        store.layers = [[{
+        const block = {
             text: result,
-            turnRange: [minStart, maxEnd],
+            turnRange: [minStart, maxEnd < 0 ? minStart : maxEnd],
             timestamp: Date.now(),
             consolidated: true,
-        }]];
+        };
+
+        if (partial) {
+            // Insertion point = position of the chronologically-first selected
+            // snippet: highest selected layer, lowest index within it.
+            const targetLayer = picked[0].layer;
+            const targetIdx = Math.min(
+                ...picked.filter(p => p.layer === targetLayer).map(p => p.idx)
+            );
+
+            // Remove selected (per layer, descending index so splices don't shift)
+            const byLayer = {};
+            for (const p of picked) (byLayer[p.layer] = byLayer[p.layer] || []).push(p.idx);
+            for (const li of Object.keys(byLayer)) {
+                byLayer[li].sort((a, b) => b - a);
+                for (const si of byLayer[li]) store.layers[li].splice(si, 1);
+            }
+
+            const dest = store.layers[targetLayer];
+            dest.splice(Math.min(targetIdx, dest.length), 0, block);
+        } else {
+            store.layers = [[block]];
+        }
 
         await saveChatStore();
         updateInjection();
         updateUI();
 
         toastr.success(
-            `Consolidated ${all.length} snippets into one block (${result.length} chars). Previous memory is backed up — use "Undo Consolidation" to revert.`,
+            `Consolidated ${all.length} snippet${all.length > 1 ? 's' : ''} into one block (${result.length} chars). ` +
+            `Previous memory is backed up — use "Undo Consolidation" to revert.`,
             'Summaryception',
             { timeOut: 7000 }
         );
-        log(`Consolidation: ${all.length} snippets → ${result.length} chars, range [${minStart}, ${maxEnd}]`);
+        log(`Consolidation (${partial ? 'partial' : 'full'}): ${all.length} snippets → ${result.length} chars, range [${block.turnRange[0]}, ${block.turnRange[1]}]`);
     } catch (e) {
         log('Consolidation error:', e);
         toastr.error(`Consolidation failed: ${e.message} — memory unchanged.`, 'Summaryception');
@@ -2116,6 +2175,7 @@ function updateSnippetBrowser() {
                     : '';
 
                 html += `<div class="sc-snippet" data-layer="${i}" data-idx="${j}">
+                <input type="checkbox" class="sc-snippet-select" data-layer="${i}" data-idx="${j}" title="Select for consolidation" />
                 <span class="sc-snippet-text" data-layer="${i}" data-idx="${j}" title="Click to edit">${escapeHtml(sn.text)}</span>
                 <span class="sc-snippet-meta">${rangeStr}${seedStr}</span>
                 ${redoBtn}
@@ -2414,15 +2474,27 @@ function bindUIEvents() {
     });
 
     $(document).on('click', '#sc_consolidate', async function () {
-        if (!window.confirm(
-            'Consolidate ALL memory snippets (every layer) into one concise bullet block?\n\n' +
-            'The current memory is backed up in this chat and can be restored with "Undo Consolidation".'
-        )) return;
+        // Read checkbox selection from the snippet browser
+        const selection = [];
+        $('.sc-snippet-select:checked').each(function () {
+            selection.push({
+                layer: parseInt($(this).data('layer'), 10),
+                idx: parseInt($(this).data('idx'), 10),
+            });
+        });
+
+        const msg = selection.length > 0
+            ? `Consolidate the ${selection.length} SELECTED snippets into one concise bullet block?\n\n` +
+              `Unselected snippets are untouched. The current memory is backed up and can be restored with "Undo Consolidation".`
+            : 'No snippets selected — consolidate ALL memory snippets (every layer) into one concise bullet block?\n\n' +
+              'Tip: tick the checkboxes in the Snippet Browser to consolidate only specific snippets.\n\n' +
+              'The current memory is backed up and can be restored with "Undo Consolidation".';
+        if (!window.confirm(msg)) return;
 
         const btn = $(this);
         btn.prop('disabled', true);
         try {
-            await consolidateMemory();
+            await consolidateMemory(selection.length > 0 ? selection : null);
         } finally {
             btn.prop('disabled', false);
         }
