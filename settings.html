@@ -27,7 +27,7 @@
             <label class="checkbox_label" for="sc_disable_ghosting">
                 <input type="checkbox" id="sc_disable_ghosting" />
                 <span>Disable Message Hiding</span>
-                <small class="sc-hint">Messages will still be summarized and excluded from LLM context, but won't be visually hidden. Useful for compatibility with other extensions (QVink, MemoryBooks, etc.).</small>
+                <small class="sc-hint">Messages will still be summarized and excluded from LLM context (via the generation interceptor), but won't be visually hidden. Useful for compatibility with other extensions (QVink, MemoryBooks, etc.). Use "Reset Hidden Messages" after toggling to re-sync already-summarized messages.</small>
             </label>
 
             <!-- ═══ Actions ═══ -->
@@ -41,6 +41,28 @@
                 <button id="sc_repair" class="menu_button">
                     <i class="fa-solid fa-wrench"></i> Repair Orphans
                 </button>
+                <button id="sc_reset_hidden" class="menu_button" title="Re-sync hidden state of summarized messages with the 'Disable Message Hiding' toggle: re-hides them when hiding is enabled, unhides them when hiding is disabled.">
+                    <i class="fa-solid fa-ghost"></i> Reset Hidden Messages
+                </button>
+                <button id="sc_consolidate" class="menu_button" title="Merge ALL memory snippets from every layer into one concise bullet block using the consolidation prompt. Previous memory is backed up for undo.">
+                    <i class="fa-solid fa-compress"></i> Consolidate Memory
+                </button>
+                <button id="sc_undo_consolidation" class="menu_button" title="Restore the memory that existed before the last consolidation.">
+                    <i class="fa-solid fa-rotate-left"></i> Undo Consolidation
+                </button>
+            </div>
+
+            <div class="sc-row">
+                <label for="sc_restore_count">
+                    <span>Restore Turns from Memory</span>
+                    <small class="sc-hint">Unhides the last N summarized assistant turns (plus their user messages) and deletes the memory snippets covering them, so they're back in the chat verbatim. Whole snippets are removed — the restored range may expand to snippet boundaries. They will be re-summarized on the next cycle unless summarization is paused.</small>
+                </label>
+                <div class="sc-slider-row">
+                    <input type="number" id="sc_restore_count" class="text_pole" min="1" max="200" step="1" value="3" style="max-width: 80px;" />
+                    <button id="sc_restore_turns" class="menu_button">
+                        <i class="fa-solid fa-clock-rotate-left"></i> Restore
+                    </button>
+                </div>
             </div>
 
             <hr class="sc-divider" />
@@ -242,7 +264,7 @@
                     <div class="sc-row">
                         <label for="sc_verbatim_turns">
                             <span>Verbatim Assistant Turns to Keep</span>
-                            <small class="sc-hint">Recent assistant turns sent word-for-word. Older ones are summarized.</small>
+                            <small class="sc-hint">Counts ASSISTANT turns only — your own messages between them also stay visible, so 10 turns ≈ 20 total unhidden messages. Older turns are summarized in batches, so the live count hovers around this value rather than sitting exactly on it.</small>
                         </label>
                         <div class="sc-slider-row">
                             <input type="range" id="sc_verbatim_turns" min="1" max="50" step="1" />
@@ -376,6 +398,45 @@
                             <small class="sc-hint">Wraps the assembled block. Use <code>{{summary}}</code> for the combined text.</small>
                         </label>
                         <textarea id="sc_injection_template" class="text_pole sc-textarea" rows="3"></textarea>
+                    </div>
+
+                    <div class="sc-row">
+                        <label for="sc_injection_position">
+                            <span>Injection Position</span>
+                            <small class="sc-hint">Where the summary block goes in the prompt. "In-chat" injects it as a message inside the chat history (like Author's Note), which most models attend to better.</small>
+                        </label>
+                        <select id="sc_injection_position" class="text_pole">
+                            <option value="0">Top of prompt (with character definitions)</option>
+                            <option value="1">In-chat at depth</option>
+                        </select>
+                    </div>
+
+                    <div class="sc-row" id="sc_injection_depth_row" style="display: none;">
+                        <label for="sc_injection_depth">
+                            <span>Injection Depth</span>
+                            <small class="sc-hint">Messages from the bottom of chat history. 0 = after the last message, 4 = above the last 4 messages, etc.</small>
+                        </label>
+                        <input type="number" id="sc_injection_depth" class="text_pole" min="0" max="999" step="1" />
+                    </div>
+
+                    <div class="sc-row" id="sc_injection_role_row" style="display: none;">
+                        <label for="sc_injection_role">
+                            <span>Injection Role</span>
+                            <small class="sc-hint">Message role used for the injected block (chat completion APIs).</small>
+                        </label>
+                        <select id="sc_injection_role" class="text_pole">
+                            <option value="0">System</option>
+                            <option value="1">User</option>
+                            <option value="2">Assistant</option>
+                        </select>
+                    </div>
+
+                    <div class="sc-row">
+                        <label for="sc_consolidation_prompt">
+                            <span>Consolidation Prompt</span>
+                            <small class="sc-hint">Instructions used by the "Consolidate Memory" button. The collected snippets (oldest first) are appended below this prompt.</small>
+                        </label>
+                        <textarea id="sc_consolidation_prompt" class="text_pole sc-textarea sc-textarea-tall" rows="5"></textarea>
                     </div>
 
                     <hr class="sc-divider" />

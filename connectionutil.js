@@ -434,12 +434,16 @@ async function sendViaOpenAI(url, apiKey, model, systemPrompt, userPrompt, maxTo
 
     const baseUrl = url.replace(/\/+$/, '');
 
-    // Build the endpoint URL
+    // Build the endpoint URL.
+    //  - If the URL already targets /chat/completions, use it as-is.
+    //  - If it ends in a version segment (/v1, /v2, /v4, /vN...), the provider's
+    //    base is already versioned (e.g. z.ai .../paas/v4) — just append the path.
+    //  - Otherwise assume a bare host and add the conventional /v1/chat/completions.
     let endpoint = baseUrl;
     if (!endpoint.endsWith('/chat/completions')) {
-        if (endpoint.endsWith('/v1')) {
+        if (/\/v\d+$/.test(endpoint)) {
             endpoint += '/chat/completions';
-        } else if (!endpoint.includes('/chat/completions')) {
+        } else {
             endpoint += '/v1/chat/completions';
         }
     }
