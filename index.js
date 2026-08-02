@@ -1798,13 +1798,25 @@ async function maybePromoteLayer(layerIndex) {
     const layer = store.layers[layerIndex];
     if (!layer || layer.length <= s.snippetsPerLayer) return;
 
+    // Consolidated blocks are user-curated: never use them as seeds and never
+    // re-summarize them in a merge. Promotion works around them.
+    const candidateIdx = layer
+        .map((sn, i) => ({ sn, i }))
+        .filter(x => !x.sn.consolidated)
+        .map(x => x.i);
+
+    if (candidateIdx.length === 0) {
+        log(`Layer ${layerIndex} over limit but contains only consolidated blocks — skipping promotion.`);
+        return;
+    }
+
     log(`Layer ${layerIndex}: ${layer.length} snippets > limit ${s.snippetsPerLayer} → promoting`);
 
     if (!store.layers[layerIndex + 1]) store.layers[layerIndex + 1] = [];
     const destLayer = store.layers[layerIndex + 1];
 
     if (destLayer.length === 0) {
-        const seed = layer.shift();
+        const seed = layer.splice(candidateIdx[0], 1)[0];
         seed.promoted = true;
         seed.seedFromLayer = layerIndex;
         destLayer.push(seed);
@@ -1826,7 +1838,14 @@ async function maybePromoteLayer(layerIndex) {
         return;
     }
 
-    const toMerge = layer.splice(0, s.snippetsPerPromotion);
+    // Oldest non-consolidated snippets, spliced out individually (descending
+    // so indices don't shift), remembering where they came from.
+    const takeIdx = candidateIdx.slice(0, s.snippetsPerPromotion);
+    const firstIdx = takeIdx[0];
+    const toMerge = [];
+    for (const i of [...takeIdx].sort((a, b) => b - a)) {
+        toMerge.unshift(layer.splice(i, 1)[0]);
+    }
     const storyTxt = toMerge.map(sn => sn.text).join(' ');
     const contextStr = buildFullContext(layerIndex + 1);
 
@@ -1838,7 +1857,7 @@ async function maybePromoteLayer(layerIndex) {
 
     const metaSummary = await callSummarizer(storyTxt, contextStr);
     if (!metaSummary) {
-        layer.unshift(...toMerge);
+        layer.splice(Math.min(firstIdx, layer.length), 0, ...toMerge);
         return;
     }
 
