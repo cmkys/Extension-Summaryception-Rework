@@ -3219,8 +3219,22 @@ globalThis.summaryceptionInterceptor = async function (chat /*, contextSize, abo
 
     getSettings();
 
+    // Derive our template path from the folder this module was ACTUALLY loaded
+    // from, so the extension works regardless of what the folder is named
+    // (e.g. GitHub zip downloads produce "Extension-Summaryception-main").
+    let templateFolder = 'third-party/Extension-Summaryception'; // fallback
+    try {
+        const parts = new URL(import.meta.url).pathname.split('/');
+        const tpIdx = parts.indexOf('third-party');
+        if (tpIdx !== -1 && parts[tpIdx + 1]) {
+            templateFolder = `third-party/${decodeURIComponent(parts[tpIdx + 1])}`;
+        }
+    } catch (e) {
+        console.warn(`${MODULE_NAME} could not derive folder name, using default:`, e);
+    }
+
     const html = await renderExtensionTemplateAsync(
-        'third-party/Extension-Summaryception',
+        templateFolder,
         'settings',
         {}
     );
