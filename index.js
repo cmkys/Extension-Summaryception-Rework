@@ -738,6 +738,13 @@ async function consolidateMemory(selection = null) {
     const snapshot = isDefaultMode ? snapshotPromptToggles() : null;
     if (isDefaultMode) disableAllPromptToggles();
 
+    // The regular summarizer system prompt demands "only the summary line, no
+    // markdown" — which overrides the bullet-list instructions and yields one
+    // long paragraph. Consolidation gets its own system prompt.
+    const CONSOLIDATION_SYSTEM_PROMPT =
+        'Role: roleplay memory consolidator. Follow the formatting instructions in the user message exactly. ' +
+        'Output only the requested bullet list, one bullet per line — no preamble, no commentary, no headings.';
+
     try {
         toastr.info(
             partial
@@ -748,7 +755,7 @@ async function consolidateMemory(selection = null) {
         );
 
         const userPrompt = `${s.consolidationPrompt}\n\nSnippets (oldest first):\n${all.join('\n')}`;
-        const raw = await sendSummarizerRequest(s, s.summarizerSystemPrompt, userPrompt);
+        const raw = await sendSummarizerRequest(s, CONSOLIDATION_SYSTEM_PROMPT, userPrompt);
         const result = cleanSummarizerOutput((raw || '').trim());
 
         if (!result) {
