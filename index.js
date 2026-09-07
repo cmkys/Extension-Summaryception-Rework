@@ -406,7 +406,7 @@ async function unghostAllMessages() {
     if (toUnhide.length === 0) return;
 
     const progressToast = toastr.info(
-        `Unhiding messages: 0 / ${toUnhide.length}`,
+        `Unhiding turns: 0%`,
         'Summaryception — Clearing',
         {
             timeOut: 0,
@@ -415,35 +415,26 @@ async function unghostAllMessages() {
         }
     );
 
-    let processed = 0;
-    for (const idx of toUnhide) {
-        if (idx >= 0 && idx < chat.length) {
-            // Clear our ghost flag
-            if (chat[idx]?.extra?.sc_ghosted) {
-                delete chat[idx].extra.sc_ghosted;
-            }
-
-            try {
-                await SillyTavern.getContext().executeSlashCommandsWithOptions(`/unhide ${idx}`, { showOutput: false });
-            } catch (e) {
-                log(`Failed to unhide message ${idx}:`, e);
-            }
-        }
-
-        processed++;
-        if (processed % 10 === 0) {
-            const pct = Math.round((processed / toUnhide.length) * 100);
-            $(progressToast).find('.toast-message').text(
-                `Unhiding messages: ${processed} / ${toUnhide.length} (${pct}%)`
-            );
+    const valid = toUnhide.filter(idx => idx >= 0 && idx < chat.length);
+    const unhideTurns = countTurns(chat, valid);
+    for (const idx of valid) {
+        if (chat[idx]?.extra?.sc_ghosted) {
+            delete chat[idx].extra.sc_ghosted;
         }
     }
+
+    await applyVisibilityCommand('unhide', valid, (done, total) => {
+        const pct = Math.round((done / total) * 100);
+        $(progressToast).find('.toast-message').text(
+            `Unhiding turns: ${pct}%`
+        );
+    });
 
     // Clear the tracking array
     store.ghostedIndices = [];
 
     toastr.clear(progressToast);
-    log(`Unghosted ${toUnhide.length} messages (only Summaryception-hidden ones)`);
+    log(`Unghosted ${unhideTurns} turns (${valid.length} messages, only Summaryception-hidden ones)`);
 }
 
 /**
@@ -491,11 +482,13 @@ async function syncGhostVisibility() {
         return s.disableGhosting ? visuallyHidden : !visuallyHidden;
     });
 
+    const totalTurns = countTurns(chat, indices);
+
     if (needsChange.length === 0) {
         toastr.info(
             s.disableGhosting
-                ? `All ${indices.length} summarized messages are already visible — nothing to unghost.`
-                : `All ${indices.length} summarized messages are already hidden — nothing to ghost.`,
+                ? `All ${totalTurns} summarized turns are already visible — nothing to unghost.`
+                : `All ${totalTurns} summarized turns are already hidden — nothing to ghost.`,
             'Summaryception',
             { timeOut: 4000 }
         );
@@ -503,39 +496,32 @@ async function syncGhostVisibility() {
     }
 
     const verb = s.disableGhosting ? 'Unhiding' : 'Hiding';
-    const cmd = s.disableGhosting ? '/unhide' : '/hide';
 
     const progressToast = toastr.info(
-        `${verb} messages: 0 / ${needsChange.length}`,
+        `${verb} turns: 0%`,
         'Summaryception — Reset',
         { timeOut: 0, extendedTimeOut: 0, tapToDismiss: false }
     );
 
-    let processed = 0;
+    // Keep flag + tracking intact in both modes, then batch the visibility change.
     for (const idx of needsChange) {
         const m = chat[idx];
-
-        // Keep flag + tracking intact in both modes.
         m.extra = m.extra || {};
         m.extra.sc_ghosted = true;
         if (!store.ghostedIndices.includes(idx)) {
             store.ghostedIndices.push(idx);
         }
-
-        try {
-            await SillyTavern.getContext().executeSlashCommandsWithOptions(`${cmd} ${idx}`, { showOutput: false });
-        } catch (e) {
-            log(`Reset: failed ${cmd} on message ${idx}:`, e);
-        }
-
-        processed++;
-        if (processed % 10 === 0) {
-            const pct = Math.round((processed / needsChange.length) * 100);
-            $(progressToast).find('.toast-message').text(
-                `${verb} messages: ${processed} / ${needsChange.length} (${pct}%)`
-            );
-        }
     }
+
+    const changedTurns = countTurns(chat, needsChange);
+    await applyVisibilityCommand(
+        s.disableGhosting ? 'unhide' : 'hide',
+        needsChange,
+        (done, total) => {
+            const pct = Math.round((done / total) * 100);
+            $(progressToast).find('.toast-message').text(`${verb} turns: ${pct}%`);
+        }
+    );
 
     toastr.clear(progressToast);
     await saveChatStore();
@@ -549,8 +535,8 @@ async function syncGhostVisibility() {
 
     toastr.success(
         s.disableGhosting
-            ? `Unghosted ${processed} messages (sc_ghosted flags kept for tracking).`
-            : `Re-hid ${processed} summarized messages.`,
+            ? `Unghosted ${changedTurns} turns (sc_ghosted flags kept for tracking).`
+            : `Re-hid ${changedTurns} summarized turns.`,
         'Summaryception',
         { timeOut: 5000 }
     );
@@ -627,18 +613,16 @@ async function restoreRecentTurns(count) {
     }
 
     // Unhide + unflag everything from cutoff onward that WE ghosted
-    let restoredMsgs = 0;
+    const toRestore = [];
+    let restoredTurns = 0;   // assistant turns (what the user asked for)
     for (let i = cutoff; i < chat.length; i++) {
         const m = chat[i];
         if (!m?.extra?.sc_ghosted) continue;
         delete m.extra.sc_ghosted;
-        try {
-            await SillyTavern.getContext().executeSlashCommandsWithOptions(`/unhide ${i}`, { showOutput: false });
-        } catch (e) {
-            log(`Restore: failed to unhide message ${i}:`, e);
-        }
-        restoredMsgs++;
+        if (!m.is_user) restoredTurns++;
+        toRestore.push(i);
     }
+    const restoredMsgs = await applyVisibilityCommand('unhide', toRestore);
     store.ghostedIndices = (store.ghostedIndices || []).filter(x => x < cutoff);
 
     // Roll back the summarization watermark, but never below a consolidated
@@ -661,13 +645,18 @@ async function restoreRecentTurns(count) {
     updateInjection();
     updateUI();
 
+    const expanded = restoredTurns > take
+        ? ` (expanded from ${take} — whole snippets are removed, so the range grew to a snippet boundary)`
+        : '';
+
     toastr.success(
-        `Restored ${restoredMsgs} messages to verbatim, removed ${removedSnippets} memory snippet(s). ` +
+        `Restored ${restoredTurns} turn${restoredTurns === 1 ? '' : 's'}${expanded} to verbatim ` +
+        `(each turn = your message + the reply). Removed ${removedSnippets} memory snippet(s). ` +
         `They'll be re-summarized on the next cycle unless you pause summarization.`,
         'Summaryception',
-        { timeOut: 6000 }
+        { timeOut: 8000 }
     );
-    log(`Restore: cutoff=${cutoff}, removed ${removedSnippets} snippets, unhid ${restoredMsgs} messages, summarizedUpTo=${store.summarizedUpTo}`);
+    log(`Restore: asked ${count}, took ${take}, cutoff=${cutoff}, restored ${restoredTurns} assistant turns / ${restoredMsgs} messages, removed ${removedSnippets} snippets, summarizedUpTo=${store.summarizedUpTo}`);
 }
 
 /**
@@ -846,13 +835,196 @@ async function undoConsolidation() {
     toastr.success('Restored pre-consolidation memory.', 'Summaryception');
 }
 
+/**
+ * Regenerate the summaries for all selected snippets, re-reading their source
+ * turns from the chat. Works on any snippet that has a turnRange (Layer 0
+ * snippets and, since promotion now records coverage, meta-summaries too).
+ *
+ * Each snippet is regenerated independently and in place — layer structure,
+ * order, and turn ranges are unchanged. Snippets without a turnRange (older
+ * meta-summaries created before ranges were tracked) are skipped.
+ */
+async function regenerateSelectedSnippets(selection) {
+    const store = getChatStore();
+    const { chat } = SillyTavern.getContext();
+
+    if (isSummarizing) {
+        toastr.warning('A summarization is already running — try again when it finishes.', 'Summaryception');
+        return;
+    }
+    if (!Array.isArray(selection) || selection.length === 0) {
+        toastr.info('Tick one or more snippets in the Snippet Browser first.', 'Summaryception');
+        return;
+    }
+
+    // Resolve selection against the live store
+    const picked = [];
+    for (const sel of selection) {
+        const sn = store.layers?.[sel.layer]?.[sel.idx];
+        if (sn) picked.push({ ...sel, sn });
+    }
+    if (picked.length !== selection.length) {
+        toastr.error('Selection is out of date — the snippet browser changed. Re-select and try again.', 'Summaryception');
+        updateUI();
+        return;
+    }
+
+    const withRange = picked.filter(p => p.sn.turnRange);
+    const skipped = picked.length - withRange.length;
+    if (withRange.length === 0) {
+        toastr.warning('None of the selected snippets have source turns recorded, so they cannot be regenerated.', 'Summaryception', { timeOut: 6000 });
+        return;
+    }
+
+    isSummarizing = true;
+    let done = 0, failed = 0;
+
+    const progressToast = toastr.info(
+        `Regenerating snippet 1 / ${withRange.length}…`,
+        'Summaryception',
+        { timeOut: 0, extendedTimeOut: 0, tapToDismiss: false }
+    );
+
+    try {
+        for (const p of withRange) {
+            const [rs, re] = p.sn.turnRange;
+            $(progressToast).find('.toast-message').text(
+                `Regenerating snippet ${done + failed + 1} / ${withRange.length} (turns ${rs}–${re})…`
+            );
+
+            const storyTxt = buildPassageFromRange(chat, rs, re);
+            if (!storyTxt.trim()) {
+                log(`Regenerate: turns ${rs}–${re} are empty, skipping.`);
+                failed++;
+                continue;
+            }
+
+            // Context = every other snippet, so the rewrite stays consistent.
+            const contextParts = [];
+            for (let li = store.layers.length - 1; li >= 0; li--) {
+                const l = store.layers[li];
+                if (!l) continue;
+                for (let sj = 0; sj < l.length; sj++) {
+                    if (li === p.layer && sj === p.idx) continue;
+                    contextParts.push(l[sj].text);
+                }
+            }
+            const contextStr = contextParts.length > 0 ? contextParts.join(' ') : '(none yet)';
+
+            let newSummary = null;
+            try {
+                newSummary = await callSummarizer(storyTxt, contextStr);
+            } catch (e) {
+                log(`Regenerate failed for turns ${rs}–${re}:`, e);
+            }
+
+            if (!newSummary) {
+                failed++;
+                continue;
+            }
+
+            p.sn.text = newSummary;
+            p.sn.timestamp = Date.now();
+            p.sn.regenerated = true;
+            done++;
+        }
+
+        await saveChatStore();
+        updateInjection();
+        updateUI();
+    } finally {
+        toastr.clear(progressToast);
+        isSummarizing = false;
+    }
+
+    const bits = [`Regenerated ${done} snippet${done === 1 ? '' : 's'}`];
+    if (failed) bits.push(`${failed} failed (originals kept)`);
+    if (skipped) bits.push(`${skipped} skipped (no source turns)`);
+    (failed ? toastr.warning : toastr.success)(bits.join(' · '), 'Summaryception', { timeOut: 6000 });
+}
+
+/**
+ * Count TURNS (exchanges) in a set of message indices.
+ *
+ * A turn = one assistant reply plus the user message that prompted it, counted
+ * as a single unit. Since every assistant message belongs to exactly one
+ * exchange, counting assistant messages gives the turn count. All user-facing
+ * reporting uses this so numbers match the "turns" you configure and request,
+ * instead of doubling when user messages are counted separately.
+ */
+function countTurns(chat, indices) {
+    let n = 0;
+    for (const i of indices) {
+        if (chat[i] && !chat[i].is_user) n++;
+    }
+    return n;
+}
+
+/**
+ * Apply /hide or /unhide to a list of message indices as few times as possible.
+ *
+ * SillyTavern's /hide and /unhide accept a range ("/hide 0-249"), so contiguous
+ * runs collapse into a single slash-command call instead of one per message.
+ * On a long chat this turns hundreds of awaited round trips into a handful,
+ * which is the difference between many seconds and near-instant.
+ *
+ * Falls back to per-message calls if a range call throws (older ST builds).
+ *
+ * @param {'hide'|'unhide'} cmd
+ * @param {number[]} indices - message indices (any order)
+ * @param {(done:number,total:number)=>void} [onProgress]
+ * @returns {Promise<number>} number of messages processed
+ */
+async function applyVisibilityCommand(cmd, indices, onProgress) {
+    if (!indices || indices.length === 0) return 0;
+
+    const sorted = [...new Set(indices)].sort((a, b) => a - b);
+
+    // Group into contiguous runs
+    const runs = [];
+    let start = sorted[0], prev = sorted[0];
+    for (let k = 1; k < sorted.length; k++) {
+        if (sorted[k] === prev + 1) {
+            prev = sorted[k];
+        } else {
+            runs.push([start, prev]);
+            start = prev = sorted[k];
+        }
+    }
+    runs.push([start, prev]);
+
+    const ctx = SillyTavern.getContext();
+    let done = 0;
+
+    for (const [a, b] of runs) {
+        const arg = a === b ? `${a}` : `${a}-${b}`;
+        try {
+            await ctx.executeSlashCommandsWithOptions(`/${cmd} ${arg}`, { showOutput: false });
+        } catch (e) {
+            log(`Range /${cmd} ${arg} failed, falling back to per-message:`, e);
+            for (let i = a; i <= b; i++) {
+                try {
+                    await ctx.executeSlashCommandsWithOptions(`/${cmd} ${i}`, { showOutput: false });
+                } catch (e2) {
+                    log(`Failed to ${cmd} message ${i}:`, e2);
+                }
+            }
+        }
+        done += (b - a + 1);
+        if (onProgress) onProgress(done, sorted.length);
+    }
+
+    log(`/${cmd}: ${sorted.length} messages in ${runs.length} call(s)`);
+    return done;
+}
+
 async function ghostMessagesUpTo(endIndex) {
     const { chat } = SillyTavern.getContext();
     const store = getChatStore();
     const s = getSettings();
 
     const progressToast = !s.disableGhosting ? toastr.info(
-        `Hiding messages: 0 / ${endIndex + 1}`,
+        `Hiding turns: 0%`,
         'Summaryception — Ghosting',
         {
             timeOut: 0,
@@ -861,7 +1033,8 @@ async function ghostMessagesUpTo(endIndex) {
         }
     ) : null;
 
-    let processed = 0;
+    // Pass 1: decide what to ghost and flag it (cheap, synchronous).
+    const toHide = [];
     for (let i = 0; i <= endIndex; i++) {
         const msg = chat[i];
         if (!msg) continue;
@@ -882,26 +1055,23 @@ async function ghostMessagesUpTo(endIndex) {
             store.ghostedIndices.push(i);
         }
 
-        // Only visually hide if ghosting is enabled
-        if (!s.disableGhosting) {
-            try {
-                await SillyTavern.getContext().executeSlashCommandsWithOptions(`/hide ${i}`, { showOutput: false });
-            } catch (e) {
-                log(`Failed to hide message ${i}:`, e);
-            }
-        }
+        toHide.push(i);
+    }
 
-        processed++;
-        if (!s.disableGhosting && progressToast && processed % 10 === 0) {
-            const pct = Math.round((i / (endIndex + 1)) * 100);
+    // Pass 2: apply the visual hide in batched ranges.
+    const hideTurns = countTurns(chat, toHide);
+    if (!s.disableGhosting && toHide.length > 0) {
+        await applyVisibilityCommand('hide', toHide, (done, total) => {
+            if (!progressToast) return;
+            const pct = Math.round((done / total) * 100);
             $(progressToast).find('.toast-message').text(
-                `Hiding messages: ${i} / ${endIndex + 1} (${pct}%)`
+                `Hiding turns: ${pct}%`
             );
-        }
+        });
     }
 
     if (progressToast) toastr.clear(progressToast);
-    log(`Ghosted messages from index 0 to ${endIndex}${s.disableGhosting ? ' (hiding disabled — metadata only)' : ''}`);
+    log(`Ghosted ${hideTurns} turns (${toHide.length} messages) up to index ${endIndex}${s.disableGhosting ? ' (hiding disabled — metadata only)' : ''}`);
 }
 
 // ─── Branch Detection & Repair ───────────────────────────────────────
@@ -1868,10 +2038,18 @@ async function maybePromoteLayer(layerIndex) {
         return;
     }
 
+    // Combined coverage of the merged snippets, so meta-summaries can report
+    // (and regenerate from) their real turn range instead of just a count.
+    const mergedRanges = toMerge.filter(sn => sn.turnRange).map(sn => sn.turnRange);
+    const mergedRange = mergedRanges.length
+        ? [Math.min(...mergedRanges.map(r => r[0])), Math.max(...mergedRanges.map(r => r[1]))]
+        : null;
+
     destLayer.push({
         text: metaSummary,
         fromLayer: layerIndex,
         mergedCount: toMerge.length,
+        turnRange: mergedRange,
         timestamp: Date.now(),
     });
 
@@ -2189,13 +2367,15 @@ function updateSnippetBrowser() {
             html += `<div class="sc-browser-layer"><div class="sc-browser-layer-title">${label}</div>`;
             for (let j = 0; j < layer.length; j++) {
                 const sn = layer[j];
-                const rangeStr = sn.turnRange
-                    ? `turns ${sn.turnRange[0]}–${sn.turnRange[1]}`
-                    : sn.mergedCount
-                        ? `merged ${sn.mergedCount} from L${sn.fromLayer}`
-                        : '';
+                // Show the turn range whenever we know it, plus merge origin
+                // for promoted meta-summaries.
+                const parts = [];
+                if (sn.turnRange) parts.push(`turns ${sn.turnRange[0]}–${sn.turnRange[1]}`);
+                if (sn.mergedCount) parts.push(`merged ${sn.mergedCount} from L${sn.fromLayer}`);
+                if (sn.consolidated) parts.push('consolidated');
+                const rangeStr = parts.join(' · ');
                 const seedStr = sn.promoted ? ' 🌱' : '';
-                const canRedo = (i === 0 && sn.turnRange);
+                const canRedo = !!sn.turnRange;
                 const redoBtn = canRedo
                     ? `<button class="sc-snippet-redo menu_button fa-solid fa-rotate-right" title="Regenerate this snippet"></button>`
                     : '';
@@ -2356,18 +2536,17 @@ function updateSnippetBrowser() {
         if (removed?.turnRange) {
             const { chat } = SillyTavern.getContext();
             const [rs, re] = removed.turnRange;
+            const toRestore = [];
             for (let i = rs; i <= Math.min(re, chat.length - 1); i++) {
                 const m = chat[i];
                 if (!m?.extra?.sc_ghosted) continue;
                 delete m.extra.sc_ghosted;
-                store.ghostedIndices = (store.ghostedIndices || []).filter(x => x !== i);
-                try {
-                    await SillyTavern.getContext().executeSlashCommandsWithOptions(`/unhide ${i}`, { showOutput: false });
-                } catch (e) {
-                    log(`Snippet delete: failed to unhide message ${i}:`, e);
-                }
-                restoredMsgs++;
+                toRestore.push(i);
             }
+            const restoreSet = new Set(toRestore);
+            store.ghostedIndices = (store.ghostedIndices || []).filter(x => !restoreSet.has(x));
+            restoredMsgs = countTurns(chat, toRestore);
+            await applyVisibilityCommand('unhide', toRestore);
         }
 
         // Recompute the watermark across ALL layers (old code only looked at
@@ -2392,7 +2571,7 @@ function updateSnippetBrowser() {
         updateUI();
         toastr.info(
             restoredMsgs > 0
-                ? `Snippet removed from Layer ${layerIdx}; ${restoredMsgs} covered messages restored to verbatim.`
+                ? `Snippet removed from Layer ${layerIdx}; ${restoredMsgs} covered turns restored to verbatim.`
                 : `Snippet removed from Layer ${layerIdx}`,
             'Summaryception'
         );
@@ -2521,6 +2700,33 @@ function bindUIEvents() {
         btn.prop('disabled', true);
         try {
             await consolidateMemory(selection.length > 0 ? selection : null);
+        } finally {
+            btn.prop('disabled', false);
+        }
+    });
+
+    $(document).on('click', '#sc_regen_selected', async function () {
+        const selection = [];
+        $('.sc-snippet-select:checked').each(function () {
+            selection.push({
+                layer: parseInt($(this).data('layer'), 10),
+                idx: parseInt($(this).data('idx'), 10),
+            });
+        });
+
+        if (selection.length === 0) {
+            toastr.info('Tick the snippets you want to regenerate in the Snippet Browser first.', 'Summaryception');
+            return;
+        }
+        if (!window.confirm(
+            `Regenerate ${selection.length} selected snippet${selection.length > 1 ? 's' : ''} from their source turns?\n\n` +
+            `Existing text is replaced. Snippets without recorded source turns are skipped.`
+        )) return;
+
+        const btn = $(this);
+        btn.prop('disabled', true);
+        try {
+            await regenerateSelectedSnippets(selection);
         } finally {
             btn.prop('disabled', false);
         }

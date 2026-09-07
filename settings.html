@@ -55,7 +55,7 @@
             <div class="sc-row">
                 <label for="sc_restore_count">
                     <span>Restore Turns from Memory</span>
-                    <small class="sc-hint">Unhides the last N summarized assistant turns (plus their user messages) and deletes the memory snippets covering them, so they're back in the chat verbatim. Whole snippets are removed — the restored range may expand to snippet boundaries. They will be re-summarized on the next cycle unless summarization is paused.</small>
+                    <small class="sc-hint">Unhides the last N summarized turns (each turn = your message + the reply) and deletes the memory snippets covering them, so they're back in the chat verbatim. Whole snippets are removed — the restored range may expand to snippet boundaries. They will be re-summarized on the next cycle unless summarization is paused.</small>
                 </label>
                 <div class="sc-slider-row">
                     <input type="number" id="sc_restore_count" class="text_pole" min="1" max="200" step="1" value="3" style="max-width: 80px;" />
@@ -69,8 +69,13 @@
 
             <!-- ═══ Snippet Browser ═══ -->
             <h4 class="sc-section-title">🗂️ Snippet Browser</h4>
-            <small class="sc-hint">Tick checkboxes to choose specific snippets for "Consolidate Memory" — with nothing ticked, it consolidates everything. Click a snippet's text to edit it.</small>
+            <small class="sc-hint">Tick checkboxes to choose snippets for "Consolidate Memory" or "Regenerate Selected" — with nothing ticked, Consolidate merges everything. Click a snippet's text to edit it.</small>
             <div id="sc_snippet_browser" class="sc-snippet-browser"></div>
+            <div class="sc-button-row">
+                <button id="sc_regen_selected" class="menu_button" title="Re-summarize the ticked snippets from their original chat turns, replacing their current text in place.">
+                    <i class="fa-solid fa-rotate-right"></i> Regenerate Selected
+                </button>
+            </div>
 
             <hr class="sc-divider" />
 
@@ -264,8 +269,8 @@
 
                     <div class="sc-row">
                         <label for="sc_verbatim_turns">
-                            <span>Verbatim Assistant Turns to Keep</span>
-                            <small class="sc-hint">Counts ASSISTANT turns only — your own messages between them also stay visible, so 10 turns ≈ 20 total unhidden messages. Older turns are summarized in batches, so the live count hovers around this value rather than sitting exactly on it.</small>
+                            <span>Verbatim Turns to Keep</span>
+                            <small class="sc-hint">A turn = your message plus the reply that follows it, counted as one. Older turns are summarized in batches, so the live count hovers around this value rather than sitting exactly on it.</small>
                         </label>
                         <div class="sc-slider-row">
                             <input type="range" id="sc_verbatim_turns" min="1" max="50" step="1" />

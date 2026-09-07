@@ -478,3 +478,8 @@
     margin: 2px 0 0 0;
     cursor: pointer;
 }
+
+/* Preserve newlines/bullets in snippet text and edit box */
+.sc-snippet-text {
+    white-space: pre-wrap;
+}
