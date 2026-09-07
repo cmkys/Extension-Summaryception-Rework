@@ -585,11 +585,15 @@ async function restoreRecentTurns(count) {
             for (let si = 0; si < layer.length; si++) {
                 const sn = layer[si];
                 const key = `${li}:${si}`;
-                if (toRemove.has(key) || !sn.turnRange || sn.consolidated) continue;
-                if (sn.turnRange[1] >= cutoff) {
+                if (toRemove.has(key) || sn.consolidated) continue;
+                const cov = snippetRanges(sn);
+                if (!cov.length) continue;
+                const covEnd = cov[cov.length - 1][1];
+                const covStart = cov[0][0];
+                if (covEnd >= cutoff) {
                     toRemove.add(key);
-                    if (sn.turnRange[0] < cutoff) {
-                        cutoff = sn.turnRange[0];
+                    if (covStart < cutoff) {
+                        cutoff = covStart;
                         changed = true;
                     }
                 }
@@ -630,7 +634,8 @@ async function restoreRecentTurns(count) {
     let floor = -1;
     for (const layer of (store.layers || [])) {
         for (const sn of (layer || [])) {
-            if (sn.consolidated && sn.turnRange) floor = Math.max(floor, sn.turnRange[1]);
+            if (!sn.consolidated) continue;
+            for (const r of snippetRanges(sn)) floor = Math.max(floor, r[1]);
         }
     }
     store.summarizedUpTo = Math.max(cutoff - 1, floor);
@@ -759,20 +764,30 @@ async function consolidateMemory(selection = null) {
             timestamp: Date.now(),
         };
 
-        // turnRange of the new block = span of what it replaces
+        // Coverage of the new block: the exact set of message ranges it
+        // replaces (kept as separate ranges when the selection has gaps),
+        // plus turnRange as the overall span for backwards compatibility.
         const sourceSnippets = partial
             ? picked.map(p => p.sn)
             : (store.layers || []).flatMap(l => l || []);
-        const ranges = sourceSnippets.filter(sn => sn.turnRange).map(sn => sn.turnRange);
-        const minStart = ranges.length ? Math.min(...ranges.map(r => r[0])) : 0;
-        const maxEnd = Math.max(
-            ranges.length ? Math.max(...ranges.map(r => r[1])) : -1,
-            partial ? -1 : store.summarizedUpTo
-        );
+
+        const collected = [];
+        for (const sn of sourceSnippets) collected.push(...snippetRanges(sn));
+        if (!partial && store.summarizedUpTo >= 0 && collected.length) {
+            // Full consolidation owns everything summarized so far.
+            collected.push([Math.min(...collected.map(r => r[0])), store.summarizedUpTo]);
+        }
+
+        const sourceRanges = mergeRanges(collected);
+        const span = sourceRanges.length
+            ? [sourceRanges[0][0], sourceRanges[sourceRanges.length - 1][1]]
+            : [0, Math.max(0, store.summarizedUpTo)];
 
         const block = {
             text: result,
-            turnRange: [minStart, maxEnd < 0 ? minStart : maxEnd],
+            turnRange: span,
+            sourceRanges,
+            mergedFrom: sourceSnippets.length,
             timestamp: Date.now(),
             consolidated: true,
         };
@@ -869,7 +884,7 @@ async function regenerateSelectedSnippets(selection) {
         return;
     }
 
-    const withRange = picked.filter(p => p.sn.turnRange);
+    const withRange = picked.filter(p => snippetRanges(p.sn).length > 0);
     const skipped = picked.length - withRange.length;
     if (withRange.length === 0) {
         toastr.warning('None of the selected snippets have source turns recorded, so they cannot be regenerated.', 'Summaryception', { timeOut: 6000 });
@@ -887,14 +902,20 @@ async function regenerateSelectedSnippets(selection) {
 
     try {
         for (const p of withRange) {
-            const [rs, re] = p.sn.turnRange;
+            // Read every range the snippet covers (consolidated blocks and
+            // promoted metas can cover several non-contiguous stretches).
+            const cov = snippetRanges(p.sn);
+            const label = formatRanges(cov);
             $(progressToast).find('.toast-message').text(
-                `Regenerating snippet ${done + failed + 1} / ${withRange.length} (turns ${rs}–${re})…`
+                `Regenerating snippet ${done + failed + 1} / ${withRange.length} (${label})…`
             );
 
-            const storyTxt = buildPassageFromRange(chat, rs, re);
+            const storyTxt = cov
+                .map(([rs, re]) => buildPassageFromRange(chat, rs, re))
+                .filter(t => t && t.trim())
+                .join('\n\n');
             if (!storyTxt.trim()) {
-                log(`Regenerate: turns ${rs}–${re} are empty, skipping.`);
+                log(`Regenerate: ${label} is empty, skipping.`);
                 failed++;
                 continue;
             }
@@ -941,6 +962,52 @@ async function regenerateSelectedSnippets(selection) {
     if (failed) bits.push(`${failed} failed (originals kept)`);
     if (skipped) bits.push(`${skipped} skipped (no source turns)`);
     (failed ? toastr.warning : toastr.success)(bits.join(' · '), 'Summaryception', { timeOut: 6000 });
+}
+
+/**
+ * Merge a list of [start, end] ranges into the smallest sorted set of
+ * non-overlapping ranges. Used so consolidated and promoted blocks record
+ * exactly which message ranges they cover, rather than one span that would
+ * falsely claim coverage of gaps between them.
+ */
+function mergeRanges(ranges) {
+    const valid = (ranges || [])
+        .filter(r => Array.isArray(r) && r.length === 2 && Number.isFinite(r[0]) && Number.isFinite(r[1]))
+        .map(r => [Math.min(r[0], r[1]), Math.max(r[0], r[1])])
+        .sort((a, b) => a[0] - b[0]);
+
+    const out = [];
+    for (const r of valid) {
+        const last = out[out.length - 1];
+        // Merge overlapping or directly adjacent ranges
+        if (last && r[0] <= last[1] + 1) {
+            last[1] = Math.max(last[1], r[1]);
+        } else {
+            out.push([...r]);
+        }
+    }
+    return out;
+}
+
+/**
+ * Collect the full coverage of a snippet: its sourceRanges if present
+ * (consolidated/promoted blocks), otherwise its single turnRange.
+ */
+function snippetRanges(sn) {
+    if (!sn) return [];
+    if (Array.isArray(sn.sourceRanges) && sn.sourceRanges.length) return sn.sourceRanges;
+    return sn.turnRange ? [sn.turnRange] : [];
+}
+
+/**
+ * Format coverage for display: "turns 0–41, 55–80" (collapses to one span
+ * when contiguous). Long lists are truncated with a count.
+ */
+function formatRanges(ranges, maxParts = 3) {
+    if (!ranges || ranges.length === 0) return '';
+    const parts = ranges.map(([a, b]) => (a === b ? `${a}` : `${a}–${b}`));
+    if (parts.length <= maxParts) return `turns ${parts.join(', ')}`;
+    return `turns ${parts.slice(0, maxParts).join(', ')} +${parts.length - maxParts} more`;
 }
 
 /**
@@ -2039,10 +2106,12 @@ async function maybePromoteLayer(layerIndex) {
     }
 
     // Combined coverage of the merged snippets, so meta-summaries can report
-    // (and regenerate from) their real turn range instead of just a count.
-    const mergedRanges = toMerge.filter(sn => sn.turnRange).map(sn => sn.turnRange);
-    const mergedRange = mergedRanges.length
-        ? [Math.min(...mergedRanges.map(r => r[0])), Math.max(...mergedRanges.map(r => r[1]))]
+    // (and regenerate from) their real turn ranges instead of just a count.
+    const collectedRanges = [];
+    for (const sn of toMerge) collectedRanges.push(...snippetRanges(sn));
+    const sourceRanges = mergeRanges(collectedRanges);
+    const mergedRange = sourceRanges.length
+        ? [sourceRanges[0][0], sourceRanges[sourceRanges.length - 1][1]]
         : null;
 
     destLayer.push({
@@ -2050,6 +2119,7 @@ async function maybePromoteLayer(layerIndex) {
         fromLayer: layerIndex,
         mergedCount: toMerge.length,
         turnRange: mergedRange,
+        sourceRanges: sourceRanges.length ? sourceRanges : undefined,
         timestamp: Date.now(),
     });
 
@@ -2367,15 +2437,16 @@ function updateSnippetBrowser() {
             html += `<div class="sc-browser-layer"><div class="sc-browser-layer-title">${label}</div>`;
             for (let j = 0; j < layer.length; j++) {
                 const sn = layer[j];
-                // Show the turn range whenever we know it, plus merge origin
-                // for promoted meta-summaries.
+                // Show exact coverage (multiple ranges when the block was
+                // consolidated from a non-contiguous selection).
                 const parts = [];
-                if (sn.turnRange) parts.push(`turns ${sn.turnRange[0]}–${sn.turnRange[1]}`);
+                const cov = snippetRanges(sn);
+                if (cov.length) parts.push(formatRanges(cov));
                 if (sn.mergedCount) parts.push(`merged ${sn.mergedCount} from L${sn.fromLayer}`);
-                if (sn.consolidated) parts.push('consolidated');
+                if (sn.consolidated) parts.push(`consolidated${sn.mergedFrom ? ` ×${sn.mergedFrom}` : ''}`);
                 const rangeStr = parts.join(' · ');
                 const seedStr = sn.promoted ? ' 🌱' : '';
-                const canRedo = !!sn.turnRange;
+                const canRedo = cov.length > 0;
                 const redoBtn = canRedo
                     ? `<button class="sc-snippet-redo menu_button fa-solid fa-rotate-right" title="Regenerate this snippet"></button>`
                     : '';
@@ -2533,15 +2604,17 @@ function updateSnippetBrowser() {
 
         // Unhide + unflag the messages this snippet covered (only ones WE ghosted)
         let restoredMsgs = 0;
-        if (removed?.turnRange) {
+        const removedCov = snippetRanges(removed);
+        if (removedCov.length) {
             const { chat } = SillyTavern.getContext();
-            const [rs, re] = removed.turnRange;
             const toRestore = [];
-            for (let i = rs; i <= Math.min(re, chat.length - 1); i++) {
-                const m = chat[i];
-                if (!m?.extra?.sc_ghosted) continue;
-                delete m.extra.sc_ghosted;
-                toRestore.push(i);
+            for (const [rs, re] of removedCov) {
+                for (let i = Math.max(0, rs); i <= Math.min(re, chat.length - 1); i++) {
+                    const m = chat[i];
+                    if (!m?.extra?.sc_ghosted) continue;
+                    delete m.extra.sc_ghosted;
+                    toRestore.push(i);
+                }
             }
             const restoreSet = new Set(toRestore);
             store.ghostedIndices = (store.ghostedIndices || []).filter(x => !restoreSet.has(x));
@@ -2555,7 +2628,7 @@ function updateSnippetBrowser() {
         let maxEnd = -1;
         for (const l of (store.layers || [])) {
             for (const sn of (l || [])) {
-                if (sn.turnRange) maxEnd = Math.max(maxEnd, sn.turnRange[1]);
+                for (const r of snippetRanges(sn)) maxEnd = Math.max(maxEnd, r[1]);
             }
         }
         store.summarizedUpTo = maxEnd;
