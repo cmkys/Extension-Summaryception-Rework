@@ -524,6 +524,15 @@ async function syncGhostVisibility() {
     );
 
     toastr.clear(progressToast);
+
+    // Verify: did the visual state actually end up where we wanted?
+    const stillWrong = needsChange.filter(i => {
+        const m = chat[i];
+        if (!m) return false;
+        const hidden = !!(m.is_system || m.is_hidden);
+        return s.disableGhosting ? hidden : !hidden;
+    });
+
     await saveChatStore();
     try {
         const ctx = SillyTavern.getContext();
@@ -532,6 +541,17 @@ async function syncGhostVisibility() {
         log('Could not save chat:', e);
     }
     updateUI();
+
+    if (stillWrong.length > 0) {
+        log(`Reset: ${stillWrong.length} messages did not change state. First few:`, stillWrong.slice(0, 10));
+        toastr.warning(
+            `${changedTurns - countTurns(chat, stillWrong)} turns changed, but ${countTurns(chat, stillWrong)} did not respond to /${s.disableGhosting ? 'unhide' : 'hide'}. ` +
+            `Enable debug mode and check the console for the affected indices.`,
+            'Summaryception',
+            { timeOut: 8000 }
+        );
+        return;
+    }
 
     toastr.success(
         s.disableGhosting
@@ -1061,27 +1081,60 @@ async function applyVisibilityCommand(cmd, indices, onProgress) {
     runs.push([start, prev]);
 
     const ctx = SillyTavern.getContext();
+    const chat = ctx.chat;
+    const wantHidden = cmd === 'hide';
+    const isHidden = (i) => !!(chat[i]?.is_system || chat[i]?.is_hidden);
+
     let done = 0;
+    let rangeSyntaxWorks = true;   // set false the first time a range no-ops
 
     for (const [a, b] of runs) {
-        const arg = a === b ? `${a}` : `${a}-${b}`;
-        try {
-            await ctx.executeSlashCommandsWithOptions(`/${cmd} ${arg}`, { showOutput: false });
-        } catch (e) {
-            log(`Range /${cmd} ${arg} failed, falling back to per-message:`, e);
+        const single = (a === b);
+        let needsFallback = false;
+
+        if (single || !rangeSyntaxWorks) {
+            needsFallback = !single;   // per-message loop below handles it
+            if (single) {
+                try {
+                    await ctx.executeSlashCommandsWithOptions(`/${cmd} ${a}`, { showOutput: false });
+                } catch (e) {
+                    log(`/${cmd} ${a} failed:`, e);
+                }
+            }
+        } else {
+            try {
+                await ctx.executeSlashCommandsWithOptions(`/${cmd} ${a}-${b}`, { showOutput: false });
+            } catch (e) {
+                log(`Range /${cmd} ${a}-${b} threw:`, e);
+                needsFallback = true;
+            }
+
+            // Some ST builds ignore range syntax silently instead of throwing,
+            // so confirm the state actually changed before trusting it.
+            if (!needsFallback && (isHidden(a) !== wantHidden || isHidden(b) !== wantHidden)) {
+                log(`Range /${cmd} ${a}-${b} had no effect — falling back to per-message for the rest of this operation.`);
+                rangeSyntaxWorks = false;
+                needsFallback = true;
+            }
+        }
+
+        if (needsFallback) {
             for (let i = a; i <= b; i++) {
+                if (isHidden(i) === wantHidden) continue;   // already correct
                 try {
                     await ctx.executeSlashCommandsWithOptions(`/${cmd} ${i}`, { showOutput: false });
                 } catch (e2) {
                     log(`Failed to ${cmd} message ${i}:`, e2);
                 }
+                if (onProgress && (i - a) % 25 === 0) onProgress(done + (i - a) + 1, sorted.length);
             }
         }
+
         done += (b - a + 1);
         if (onProgress) onProgress(done, sorted.length);
     }
 
-    log(`/${cmd}: ${sorted.length} messages in ${runs.length} call(s)`);
+    log(`/${cmd}: ${sorted.length} messages in ${runs.length} run(s)${rangeSyntaxWorks ? ' (range syntax)' : ' (per-message fallback)'}`);
     return done;
 }
 
